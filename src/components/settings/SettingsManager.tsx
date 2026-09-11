@@ -6,6 +6,7 @@ import { exportDatabaseBackup, restoreDatabaseBackup } from '../../services/back
 import { updateEmployeePin } from '../../services/authService';
 import { useAuth } from '../../context/AuthContext';
 import { formatDateTime } from '../../services/printService';
+import { PrintBridgeClient, DetectedPrinter, BridgeHealthStatus } from '../../services/printBridgeClient';
 import {
   Settings,
   Store,
@@ -18,7 +19,13 @@ import {
   Upload,
   CheckCircle2,
   AlertCircle,
-  Key
+  Key,
+  RefreshCw,
+  Zap,
+  Check,
+  Terminal,
+  Layers,
+  Coins,
 } from 'lucide-react';
 
 import { sanitizeString, settingsSchema } from '../../services/security';
@@ -42,6 +49,17 @@ export const SettingsManager: React.FC = () => {
   const [autoPrint, setAutoPrint] = useState<boolean>(true);
   const [lowStockDefault, setLowStockDefault] = useState<number>(5);
 
+  // Thermal Printer Form
+  const [printerType, setPrinterType] = useState<'80mm' | '58mm'>('80mm');
+  const [selectedPrinter, setSelectedPrinter] = useState<string>('');
+  const [autoCutPaper, setAutoCutPaper] = useState<boolean>(true);
+  const [openCashDrawerOnSale, setOpenCashDrawerOnSale] = useState<boolean>(false);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeHealthStatus | null>(null);
+  const [availablePrinters, setAvailablePrinters] = useState<DetectedPrinter[]>([]);
+  const [isScanningPrinters, setIsScanningPrinters] = useState<boolean>(false);
+  const [isTestingPrint, setIsTestingPrint] = useState<boolean>(false);
+  const [isTestingDrawer, setIsTestingDrawer] = useState<boolean>(false);
+
   // Security Form
   const [ownerPin, setOwnerPin] = useState<string>('');
   const [cashierPin, setCashierPin] = useState<string>('');
@@ -59,14 +77,46 @@ export const SettingsManager: React.FC = () => {
       setReceiptFooter(settings.receiptFooterMessage || 'Thank you for choosing Zenexis! Please visit again.');
       setAutoPrint(settings.autoPrintReceipt ?? true);
       setLowStockDefault(settings.lowStockThresholdDefault || 5);
+      setPrinterType((settings.printerType as '80mm' | '58mm') || '80mm');
+      setSelectedPrinter(settings.selectedPrinter || '');
+      setAutoCutPaper(settings.autoCutPaper ?? true);
+      setOpenCashDrawerOnSale(settings.openCashDrawerOnSale ?? false);
     }
   }, [settings]);
+
+  // Scan for printers and bridge health
+  const refreshBridgeAndPrinters = async () => {
+    setIsScanningPrinters(true);
+    try {
+      const status = await PrintBridgeClient.checkStatus();
+      setBridgeStatus(status);
+
+      const printers = await PrintBridgeClient.getPrinters();
+      setAvailablePrinters(printers);
+
+      // If no printer is selected yet and printers exist, select default
+      if (!selectedPrinter && printers.length > 0) {
+        const def = printers.find(p => p.isDefault) || printers[0];
+        setSelectedPrinter(def.name);
+      }
+    } catch (e) {
+      console.warn('Printer scan error:', e);
+    } finally {
+      setIsScanningPrinters(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshBridgeAndPrinters();
+  }, [activeTab]);
 
   const handleSaveShopSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     try {
+      const current = (await db.settings.toCollection().first()) || {};
       const validated = settingsSchema.parse({
+        ...current,
         shopName: sanitizeString(shopName),
         shopLocation: sanitizeString(shopLocation),
         shopPhone: sanitizeString(shopPhone),
@@ -74,7 +124,7 @@ export const SettingsManager: React.FC = () => {
         currency: 'Rs.',
         receiptHeaderNotice: sanitizeString(receiptHeader),
         receiptFooterMessage: sanitizeString(receiptFooter),
-        printerType: '80mm',
+        printerType: printerType,
         autoPrintReceipt: autoPrint,
         lowStockThresholdDefault: Number(lowStockDefault),
         enableSoundEffects: true,
@@ -98,6 +148,81 @@ export const SettingsManager: React.FC = () => {
       setTimeout(() => setStatusMessage(''), 3000);
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to save settings');
+    }
+  };
+
+  const handleSavePrinterSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage('');
+    try {
+      const current = ((await db.settings.toCollection().first()) || {}) as Partial<AppSettings>;
+      const validated = settingsSchema.parse({
+        ...current,
+        shopName: current.shopName || 'Zenexis',
+        shopLocation: current.shopLocation || 'Polhena, Ambalangoda',
+        shopPhone: current.shopPhone || '0707120945',
+        shopEmail: current.shopEmail || 'zenexis@gmail.com',
+        printerType: printerType,
+        selectedPrinter: selectedPrinter,
+        autoPrintReceipt: autoPrint,
+        autoCutPaper: autoCutPaper,
+        openCashDrawerOnSale: openCashDrawerOnSale,
+        printMethod: bridgeStatus?.online ? 'bridge' : ((window as any).electronAPI ? 'electron' : 'browser'),
+      });
+
+      await db.settings.put({
+        id: 'default_settings',
+        ...validated,
+        updatedAt: new Date().toISOString(),
+      });
+
+      await logAuditEvent({
+        userId: currentUser?.id || 'system',
+        userName: currentUser?.name || 'Admin',
+        action: 'SETTINGS_UPDATE',
+        details: `Thermal Printer configuration updated (Printer: ${selectedPrinter || 'Default'}, Width: ${printerType})`,
+      });
+
+      setStatusMessage('Thermal Printer settings saved successfully!');
+      setTimeout(() => setStatusMessage(''), 3000);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to save printer settings');
+    }
+  };
+
+  const handleTestPrint = async () => {
+    setIsTestingPrint(true);
+    setErrorMessage('');
+    try {
+      const res = await PrintBridgeClient.printTestReceipt(selectedPrinter, printerType, shopName);
+      if (res.success) {
+        setStatusMessage('Test receipt sent directly to thermal printer!');
+      } else {
+        setErrorMessage(res.error || 'Test print failed. Make sure Print Bridge is running.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to execute test print');
+    } finally {
+      setIsTestingPrint(false);
+      setTimeout(() => setStatusMessage(''), 4000);
+    }
+  };
+
+  const handleTestDrawer = async () => {
+    setIsTestingDrawer(true);
+    setErrorMessage('');
+    try {
+      const res = await PrintBridgeClient.openCashDrawer(selectedPrinter);
+      if (res.success) {
+        setStatusMessage('Cash drawer kick pulse sent!');
+      } else {
+        setErrorMessage(res.error || 'Failed to trigger cash drawer.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Drawer test error');
+    } finally {
+      setIsTestingDrawer(false);
+      setTimeout(() => setStatusMessage(''), 4000);
     }
   };
 
@@ -174,6 +299,8 @@ export const SettingsManager: React.FC = () => {
     reader.readAsText(file);
   };
 
+  const isElectron = Boolean((window as any).electronAPI);
+
   return (
     <div className="flex-1 flex flex-col h-full bg-slate-950 p-6 space-y-6 overflow-hidden select-none">
       {/* Top Header */}
@@ -181,23 +308,23 @@ export const SettingsManager: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center space-x-2">
             <Settings className="w-6 h-6 text-sky-400" />
-            <span>Settings & Security Center</span>
+            <span>Settings & Hardware Configuration</span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Configure shop profile, 80mm thermal receipts, staff PIN security, and database backup/restore
+            Configure shop profile, silent thermal direct printing, staff PIN security, and offline backup
           </p>
         </div>
       </div>
 
       {statusMessage && (
-        <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center space-x-2 shrink-0">
+        <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center space-x-2 shrink-0 animate-in fade-in">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{statusMessage}</span>
         </div>
       )}
 
       {errorMessage && (
-        <div className="p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center space-x-2 shrink-0">
+        <div className="p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center space-x-2 shrink-0 animate-in fade-in">
           <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
           <span>{errorMessage}</span>
         </div>
@@ -222,7 +349,10 @@ export const SettingsManager: React.FC = () => {
           }`}
         >
           <Printer className="w-4 h-4" />
-          <span>Xprinter 80mm Config</span>
+          <span>Thermal Printer & Silent Print</span>
+          {bridgeStatus?.online && (
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          )}
         </button>
 
         <button
@@ -258,44 +388,44 @@ export const SettingsManager: React.FC = () => {
 
       {/* TAB 1: Shop & Receipts */}
       {activeTab === 'shop' && (
-        <form onSubmit={handleSaveShopSettings} className="flex-1 overflow-y-auto space-y-4 max-w-2xl">
+        <form onSubmit={handleSaveShopSettings} className="flex-1 overflow-y-auto space-y-4 max-w-2xl pr-2">
           <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
-            <h3 className="text-sm font-bold text-white">Shop Profile Details</h3>
+            <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+              <Store className="w-4 h-4 text-sky-400" />
+              <span>Business Profile & Information</span>
+            </h3>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Shop Name *</label>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Business Name</label>
                 <input
                   type="text"
                   value={shopName}
                   onChange={(e) => setShopName(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs"
-                  required
                 />
               </div>
+
               <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Shop Location *</label>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Location / Address</label>
                 <input
                   type="text"
                   value={shopLocation}
                   onChange={(e) => setShopLocation(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs"
-                  required
                 />
               </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Contact Phone *</label>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Phone Number</label>
                 <input
                   type="text"
                   value={shopPhone}
                   onChange={(e) => setShopPhone(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-xs"
-                  required
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs"
                 />
               </div>
+
               <div>
                 <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Email Address</label>
                 <input
@@ -306,10 +436,6 @@ export const SettingsManager: React.FC = () => {
                 />
               </div>
             </div>
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
-            <h3 className="text-sm font-bold text-white">80mm Thermal Receipt Header & Footer</h3>
 
             <div>
               <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Receipt Header Tagline</label>
@@ -322,11 +448,11 @@ export const SettingsManager: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Receipt Footer Message</label>
-              <input
-                type="text"
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Receipt Footer Notice</label>
+              <textarea
                 value={receiptFooter}
                 onChange={(e) => setReceiptFooter(e.target.value)}
+                rows={2}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs"
               />
             </div>
@@ -348,46 +474,228 @@ export const SettingsManager: React.FC = () => {
             className="px-6 py-3 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-sky-500/25 flex items-center space-x-2 transition"
           >
             <Save className="w-4 h-4" />
-            <span>Save Settings Changes</span>
+            <span>Save Profile Settings</span>
           </button>
         </form>
       )}
 
-      {/* TAB 2: Printer Setup */}
+      {/* TAB 2: Thermal Printer & Silent Print Setup */}
       {activeTab === 'printer' && (
-        <div className="flex-1 overflow-y-auto space-y-4 max-w-2xl">
+        <form onSubmit={handleSavePrinterSettings} className="flex-1 overflow-y-auto space-y-4 max-w-3xl pr-2">
+          {/* Bridge & Driver Status Card */}
           <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
-            <h3 className="text-sm font-bold text-white flex items-center space-x-2">
-              <Printer className="w-4 h-4 text-sky-400" />
-              <span>Xprinter XP-80T (80mm Continuous Thermal Roll)</span>
-            </h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                <Printer className="w-4 h-4 text-sky-400" />
+                <span>Direct Thermal Printing Engine</span>
+              </h3>
 
-            <div className="p-3.5 bg-slate-950/60 rounded-xl border border-slate-800 text-xs text-slate-300 space-y-2">
-              <div className="flex justify-between">
-                <span>Model Specs:</span>
-                <span className="font-mono font-bold text-white">80mm Paper Width • 200mm/s Speed</span>
+              <button
+                type="button"
+                onClick={refreshBridgeAndPrinters}
+                disabled={isScanningPrinters}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg flex items-center space-x-1.5 transition font-semibold"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isScanningPrinters ? 'animate-spin' : ''}`} />
+                <span>Scan Hardware</span>
+              </button>
+            </div>
+
+            {/* Status Indicators */}
+            {bridgeStatus?.online ? (
+              <div className="p-4 bg-emerald-950/40 border border-emerald-500/40 rounded-xl flex items-start space-x-3 text-emerald-300">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+                <div className="text-xs space-y-0.5 flex-1">
+                  <div className="flex items-center space-x-2 font-bold text-white">
+                    <span>Zenexis Local Print Bridge: ONLINE (Port {bridgeStatus.port})</span>
+                    <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 text-[10px] rounded-full border border-emerald-500/30">
+                      100% Free • Zero Cloud Delay
+                    </span>
+                  </div>
+                  <p className="text-slate-300">
+                    Direct silent printing is fully active. Receipts print instantly without any browser print popup or monthly subscription fees!
+                  </p>
+                </div>
               </div>
-              <div className="flex justify-between">
-                <span>Print Engine:</span>
-                <span className="font-mono text-emerald-400">Dynamic Height Auto-Cut (No Blank Waste)</span>
+            ) : isElectron ? (
+              <div className="p-4 bg-sky-950/40 border border-sky-500/40 rounded-xl flex items-start space-x-3 text-sky-300">
+                <Zap className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+                <div className="text-xs space-y-0.5 flex-1">
+                  <div className="font-bold text-white">Electron Desktop Silent Printing: ACTIVE</div>
+                  <p className="text-slate-300">
+                    Running inside Zenexis Desktop App. Receipts print directly to your thermal printer silently.
+                  </p>
+                </div>
               </div>
-              <div className="flex justify-between">
-                <span>Printable Width:</span>
-                <span className="font-mono text-slate-300">72mm - 80mm ESC/POS CSS Standard</span>
+            ) : (
+              <div className="p-4 bg-amber-950/40 border border-amber-500/40 rounded-xl flex items-start space-x-3 text-amber-300">
+                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="text-xs space-y-1 flex-1">
+                  <div className="font-bold text-white">Print Bridge Service Not Detected (Browser Dialog Mode Active)</div>
+                  <p className="text-slate-300">
+                    For 100% silent direct printing without browser print dialogs, run <span className="text-sky-400 font-mono font-bold">start-bridge.bat</span> in the <span className="text-sky-400 font-mono">print-bridge/</span> folder on this PC.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Target Printer Selection */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1.5">
+                Target Thermal Printer Device
+              </label>
+              <div className="flex space-x-2">
+                <select
+                  value={selectedPrinter}
+                  onChange={(e) => setSelectedPrinter(e.target.value)}
+                  className="flex-1 px-3 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs font-mono font-semibold"
+                >
+                  <option value="">-- Windows Default Printer --</option>
+                  {availablePrinters.map((p, idx) => (
+                    <option key={idx} value={p.name}>
+                      {p.name} {p.isDefault ? '(Default)' : ''} {p.port ? `[${p.port}]` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Select your thermal printer (e.g. Xprinter XP-80, POS-58, EPSON TM-T88, etc.).
+              </p>
+            </div>
+
+            {/* Paper Width Selector */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1.5">
+                Thermal Roll Paper Width
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPrinterType('80mm')}
+                  className={`p-3 rounded-xl border text-left flex items-center justify-between transition ${
+                    printerType === '80mm'
+                      ? 'bg-sky-950/60 border-sky-500 text-white'
+                      : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <div>
+                    <div className="font-bold text-xs">80mm Roll (Standard POS)</div>
+                    <div className="text-[10px] text-slate-400">76mm printable width • Best for detailed receipts</div>
+                  </div>
+                  {printerType === '80mm' && <Check className="w-4 h-4 text-sky-400" />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setPrinterType('58mm')}
+                  className={`p-3 rounded-xl border text-left flex items-center justify-between transition ${
+                    printerType === '58mm'
+                      ? 'bg-sky-950/60 border-sky-500 text-white'
+                      : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <div>
+                    <div className="font-bold text-xs">58mm Roll (Compact / Mobile)</div>
+                    <div className="text-[10px] text-slate-400">54mm printable width • Portable POS size</div>
+                  </div>
+                  {printerType === '58mm' && <Check className="w-4 h-4 text-sky-400" />}
+                </button>
               </div>
             </div>
 
-            <label className="flex items-center space-x-3 text-xs text-slate-300 cursor-pointer pt-2">
-              <input
-                type="checkbox"
-                checked={autoPrint}
-                onChange={(e) => setAutoPrint(e.target.checked)}
-                className="w-4 h-4 rounded text-sky-500 bg-slate-950 border-slate-700"
-              />
-              <span>Automatically trigger silent / instant thermal print upon checkout completion</span>
-            </label>
+            {/* Automation Options */}
+            <div className="pt-2 border-t border-slate-800 space-y-3">
+              <label className="flex items-center space-x-3 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoPrint}
+                  onChange={(e) => setAutoPrint(e.target.checked)}
+                  className="w-4 h-4 rounded text-sky-500 bg-slate-950 border-slate-700"
+                />
+                <span>Automatically trigger silent thermal print upon checkout payment</span>
+              </label>
+
+              <label className="flex items-center space-x-3 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoCutPaper}
+                  onChange={(e) => setAutoCutPaper(e.target.checked)}
+                  className="w-4 h-4 rounded text-sky-500 bg-slate-950 border-slate-700"
+                />
+                <span>Send ESC/POS Auto-Cut Paper signal after each receipt</span>
+              </label>
+
+              <label className="flex items-center space-x-3 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={openCashDrawerOnSale}
+                  onChange={(e) => setOpenCashDrawerOnSale(e.target.checked)}
+                  className="w-4 h-4 rounded text-sky-500 bg-slate-950 border-slate-700"
+                />
+                <span>Kick RJ11 Cash Drawer open automatically on cash payments</span>
+              </label>
+            </div>
           </div>
-        </div>
+
+          {/* Hardware Testing Section */}
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              <span>Instant Hardware Diagnostics & Test</span>
+            </h3>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={handleTestPrint}
+                disabled={isTestingPrint}
+                className="py-3 px-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-xs rounded-xl flex items-center justify-center space-x-2 transition shadow"
+              >
+                <Printer className="w-4 h-4 text-sky-400" />
+                <span>{isTestingPrint ? 'Sending Test...' : 'Print Test Receipt Ticket'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTestDrawer}
+                disabled={isTestingDrawer}
+                className="py-3 px-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-xs rounded-xl flex items-center justify-center space-x-2 transition shadow"
+              >
+                <Coins className="w-4 h-4 text-amber-400" />
+                <span>{isTestingDrawer ? 'Kicking Drawer...' : 'Test Cash Drawer Kick'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Free Setup Instructions Box */}
+          <div className="bg-slate-900/60 border border-slate-800/80 p-5 rounded-2xl space-y-3">
+            <h4 className="text-xs font-bold text-sky-300 uppercase tracking-wider flex items-center space-x-1.5">
+              <Layers className="w-4 h-4 text-sky-400" />
+              <span>How to Use Zenexis Free Print Bridge (Zero Cost Forever)</span>
+            </h4>
+            <div className="text-[11px] text-slate-300 space-y-1.5 leading-relaxed">
+              <p>
+                <strong className="text-white">1. Start Local Bridge:</strong> Open the <span className="font-mono text-sky-300">print-bridge</span> folder and double click <span className="font-mono text-emerald-400">start-bridge.bat</span>.
+              </p>
+              <p>
+                <strong className="text-white">2. Automatic Windows Boot:</strong> Run <span className="font-mono text-sky-300">install-autostart.bat</span> once so it starts silently every time your PC turns on.
+              </p>
+              <p>
+                <strong className="text-white">3. 100% Free Forever:</strong> No PrintBridge license keys, no monthly fees, and no third-party cloud dependence.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex space-x-3 pt-2">
+            <button
+              type="submit"
+              className="px-6 py-3 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-sky-500/25 flex items-center space-x-2 transition"
+            >
+              <Save className="w-4 h-4" />
+              <span>Save Thermal Printer Configuration</span>
+            </button>
+          </div>
+        </form>
       )}
 
       {/* TAB 3: PIN Security */}

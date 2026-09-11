@@ -159,14 +159,81 @@ export function exportSingleSaleToPDF(sale: Sale, settings?: AppSettings): void 
   doc.save(`${sale.invoiceNumber}_Receipt.pdf`);
 }
 
-export async function triggerThermalPrint(elementId: string): Promise<void> {
+import { PrintBridgeClient } from './printBridgeClient';
+import { db } from '../db/db';
+
+export async function triggerThermalPrint(
+  elementId: string,
+  overrideOptions?: {
+    printerName?: string;
+    width?: '80mm' | '58mm';
+    cut?: boolean;
+    openDrawer?: boolean;
+    forceBrowserDialog?: boolean;
+  }
+): Promise<void> {
   const printContent = document.getElementById(elementId);
   if (!printContent) {
     console.error(`Print element #${elementId} not found`);
     return;
   }
 
-  // Create an isolated printable iframe for crisp, exact 80mm thermal rendering
+  // Get current settings from DB
+  let appSettings: AppSettings | undefined;
+  try {
+    appSettings = await db.settings.toCollection().first();
+  } catch (e) {
+    // DB query error fallback
+  }
+
+  const printerName = overrideOptions?.printerName || appSettings?.selectedPrinter || '';
+  const paperWidth = overrideOptions?.width || (appSettings?.printerType === '58mm' ? '58mm' : '80mm');
+  const shouldCut = overrideOptions?.cut ?? (appSettings?.autoCutPaper ?? true);
+  const shouldOpenDrawer = overrideOptions?.openDrawer ?? (appSettings?.openCashDrawerOnSale ?? false);
+  const forceDialog = overrideOptions?.forceBrowserDialog ?? false;
+
+  // 1. Silent Direct Print via Zenexis Free Print Bridge (if not forced to dialog)
+  if (!forceDialog) {
+    // Check if Electron native print available
+    if ((window as any).electronAPI?.printThermalReceipt) {
+      try {
+        const res = await (window as any).electronAPI.printThermalReceipt({
+          silent: true,
+          printerName: printerName || undefined,
+          html: printContent.innerHTML,
+          width: paperWidth,
+        });
+        if (res.success) {
+          console.log('Printed silently via Electron Desktop Engine');
+          return;
+        }
+      } catch (err) {
+        console.warn('Electron silent print failed, trying local bridge:', err);
+      }
+    }
+
+    // Check if Local Print Bridge is running
+    const bridgeStatus = await PrintBridgeClient.checkStatus();
+    if (bridgeStatus.online) {
+      try {
+        const bridgeRes = await PrintBridgeClient.print({
+          printerName: printerName || undefined,
+          html: printContent.innerHTML,
+          width: paperWidth,
+          cut: shouldCut,
+          openDrawer: shouldOpenDrawer,
+        });
+        if (bridgeRes.success) {
+          console.log('Printed silently via Zenexis Local Print Bridge');
+          return;
+        }
+      } catch (bridgeErr) {
+        console.warn('Local print bridge error:', bridgeErr);
+      }
+    }
+  }
+
+  // 2. Fallback: Standard browser iframe print dialog
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
   iframe.style.right = '0';
@@ -182,6 +249,9 @@ export async function triggerThermalPrint(elementId: string): Promise<void> {
     return;
   }
 
+  const bodyWidth = paperWidth === '58mm' ? '54mm' : '76mm';
+  const pageSize = paperWidth === '58mm' ? '58mm auto' : '80mm auto';
+
   doc.open();
   doc.write(`
     <!DOCTYPE html>
@@ -190,7 +260,7 @@ export async function triggerThermalPrint(elementId: string): Promise<void> {
         <title>Receipt Print</title>
         <style>
           @page {
-            size: 80mm auto;
+            size: ${pageSize};
             margin: 0mm;
           }
           * {
@@ -199,7 +269,7 @@ export async function triggerThermalPrint(elementId: string): Promise<void> {
             print-color-adjust: exact;
           }
           body {
-            width: 76mm;
+            width: ${bodyWidth};
             margin: 0 auto;
             padding: 2mm 1mm;
             font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
@@ -244,4 +314,5 @@ export async function triggerThermalPrint(elementId: string): Promise<void> {
     }, 1000);
   }, 250);
 }
+
 

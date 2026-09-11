@@ -299,9 +299,15 @@ export interface AppSettings {
   receiptFooterMessage: string;
   printerType: '80mm' | '58mm' | 'A4';
   autoPrintReceipt: boolean;
+  selectedPrinter?: string;
+  printMethod?: 'bridge' | 'electron' | 'browser';
+  bridgePort?: number;
+  autoCutPaper?: boolean;
+  openCashDrawerOnSale?: boolean;
   lowStockThresholdDefault: number;
   enableSoundEffects: boolean;
   enableAIInsights: boolean;
   updatedAt: string;
 }
+
 

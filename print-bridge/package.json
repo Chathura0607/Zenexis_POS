@@ -1,0 +1,19 @@
+{
+  "name": "zenexis-print-bridge",
+  "version": "1.0.0",
+  "description": "Free, Local, Zero-Cloud Silent Thermal Print Bridge for Zenexis Web POS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "pos",
+    "print-bridge",
+    "thermal-printer",
+    "escpos",
+    "silent-print",
+    "xprinter"
+  ],
+  "author": "Zenexis Technologies",
+  "license": "MIT"
+}

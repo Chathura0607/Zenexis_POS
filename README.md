@@ -157,5 +157,5 @@ This project is licensed under the [MIT License](LICENSE).
 ---
 
 <p align="center">
-  Crafted with ❤️ by <strong>Zenexis Technologies</strong>
+  Crafted by <strong>Chathura Lakmina</strong>
 </p>

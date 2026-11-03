@@ -26,14 +26,32 @@ import {
   Terminal,
   Layers,
   Coins,
+  Cloud,
+  CloudOff,
+  UploadCloud,
+  DownloadCloud,
+  Globe,
+  Wifi,
+  WifiOff,
+  Sparkles,
 } from 'lucide-react';
 
 import { sanitizeString, settingsSchema } from '../../services/security';
 import { logAuditEvent } from '../../services/authService';
+import {
+  subscribeToSyncStatus,
+  getCurrentSyncStatus,
+  testFirebaseConnection,
+  processSyncQueue,
+  pushAllLocalDataToCloud,
+  pullAllDataFromCloud,
+  initFirebase,
+} from '../../services/cloudSyncService';
+import { CloudSyncStatus } from '../../types';
 
 export const SettingsManager: React.FC = () => {
   const { currentUser, isOwner } = useAuth();
-  const [activeTab, setActiveTab] = useState<'shop' | 'printer' | 'security' | 'backup' | 'audit'>('shop');
+  const [activeTab, setActiveTab] = useState<'shop' | 'printer' | 'cloud' | 'security' | 'backup' | 'audit'>('shop');
 
   const settings = useLiveQuery(() => db.settings.toCollection().first());
   const auditLogs = useLiveQuery(() => db.auditLogs.orderBy('timestamp').reverse().limit(50).toArray());
@@ -48,6 +66,30 @@ export const SettingsManager: React.FC = () => {
   const [receiptFooter, setReceiptFooter] = useState<string>('Thank you for choosing Zenexis! Please visit again.');
   const [autoPrint, setAutoPrint] = useState<boolean>(true);
   const [lowStockDefault, setLowStockDefault] = useState<number>(5);
+
+  // Cloud Sync Form
+  const [firebaseApiKey, setFirebaseApiKey] = useState<string>('');
+  const [firebaseAuthDomain, setFirebaseAuthDomain] = useState<string>('zenexis-pos.firebaseapp.com');
+  const [firebaseProjectId, setFirebaseProjectId] = useState<string>('zenexis-pos');
+  const [firebaseStorageBucket, setFirebaseStorageBucket] = useState<string>('zenexis-pos.appspot.com');
+  const [firebaseMessagingSenderId, setFirebaseMessagingSenderId] = useState<string>('');
+  const [firebaseAppId, setFirebaseAppId] = useState<string>('');
+  const [firebaseShopId, setFirebaseShopId] = useState<string>('zenexis-pos-main');
+  const [firebaseEnabled, setFirebaseEnabled] = useState<boolean>(false);
+  const [firebaseAutoSync, setFirebaseAutoSync] = useState<boolean>(true);
+  const [firebaseInterval, setFirebaseInterval] = useState<number>(2);
+
+  const [syncStatus, setSyncStatus] = useState<CloudSyncStatus>(getCurrentSyncStatus());
+  const [isTestingCloud, setIsTestingCloud] = useState<boolean>(false);
+  const [isPushingCloud, setIsPushingCloud] = useState<boolean>(false);
+  const [isPullingCloud, setIsPullingCloud] = useState<boolean>(false);
+  const [cloudProgress, setCloudProgress] = useState<{ message: string; percent: number } | null>(null);
+
+  useEffect(() => {
+    const unsub = subscribeToSyncStatus(setSyncStatus);
+    return unsub;
+  }, []);
+
 
   // Thermal Printer Form
   const [printerType, setPrinterType] = useState<'80mm' | '58mm'>('80mm');
@@ -81,6 +123,19 @@ export const SettingsManager: React.FC = () => {
       setSelectedPrinter(settings.selectedPrinter || '');
       setAutoCutPaper(settings.autoCutPaper ?? true);
       setOpenCashDrawerOnSale(settings.openCashDrawerOnSale ?? false);
+
+      if (settings.firebaseConfig) {
+        setFirebaseApiKey(settings.firebaseConfig.apiKey || '');
+        setFirebaseAuthDomain(settings.firebaseConfig.authDomain || '');
+        setFirebaseProjectId(settings.firebaseConfig.projectId || '');
+        setFirebaseStorageBucket(settings.firebaseConfig.storageBucket || '');
+        setFirebaseMessagingSenderId(settings.firebaseConfig.messagingSenderId || '');
+        setFirebaseAppId(settings.firebaseConfig.appId || '');
+        setFirebaseShopId(settings.firebaseConfig.shopId || 'zenexis-pos-main');
+        setFirebaseEnabled(Boolean(settings.firebaseConfig.enabled));
+        setFirebaseAutoSync(settings.firebaseConfig.autoSync ?? true);
+        setFirebaseInterval(settings.firebaseConfig.syncIntervalMinutes || 2);
+      }
     }
   }, [settings]);
 
@@ -299,6 +354,149 @@ export const SettingsManager: React.FC = () => {
     reader.readAsText(file);
   };
 
+  const handleSaveCloudSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage('');
+    try {
+      const current = ((await db.settings.toCollection().first()) || {}) as Partial<AppSettings>;
+      const config = {
+        apiKey: firebaseApiKey.trim(),
+        authDomain: firebaseAuthDomain.trim() || undefined,
+        projectId: firebaseProjectId.trim(),
+        storageBucket: firebaseStorageBucket.trim() || undefined,
+        messagingSenderId: firebaseMessagingSenderId.trim() || undefined,
+        appId: firebaseAppId.trim(),
+        shopId: firebaseShopId.trim() || 'zenexis-pos-main',
+        enabled: firebaseEnabled,
+        autoSync: firebaseAutoSync,
+        syncIntervalMinutes: Number(firebaseInterval) || 2,
+        lastSyncTime: current.firebaseConfig?.lastSyncTime,
+      };
+
+      if (firebaseEnabled && (!config.apiKey || !config.projectId || !config.appId)) {
+        throw new Error('Please provide at least API Key, Project ID, and App ID to enable Firebase sync.');
+      }
+
+      await db.settings.put({
+        id: 'default_settings',
+        ...current,
+        firebaseConfig: config,
+        updatedAt: new Date().toISOString(),
+      } as any);
+
+      if (firebaseEnabled) {
+        const initRes = initFirebase(config);
+        if (!initRes.success) {
+          throw new Error('Firebase initialized with warning: ' + initRes.error);
+        }
+      }
+
+      await logAuditEvent({
+        userId: currentUser?.id || 'system',
+        userName: currentUser?.name || 'Admin',
+        action: 'SETTINGS_UPDATE',
+        details: `Cloud Sync settings updated (Enabled: ${firebaseEnabled}, Project: ${config.projectId || 'None'})`,
+      });
+
+      setStatusMessage('Cloud Sync configuration saved successfully!');
+      setTimeout(() => setStatusMessage(''), 3000);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to save cloud sync settings');
+    }
+  };
+
+  const handleTestCloudConnection = async () => {
+    setIsTestingCloud(true);
+    setErrorMessage('');
+    try {
+      const config = {
+        apiKey: firebaseApiKey.trim(),
+        authDomain: firebaseAuthDomain.trim() || undefined,
+        projectId: firebaseProjectId.trim(),
+        storageBucket: firebaseStorageBucket.trim() || undefined,
+        messagingSenderId: firebaseMessagingSenderId.trim() || undefined,
+        appId: firebaseAppId.trim(),
+        shopId: firebaseShopId.trim() || 'zenexis-pos-main',
+        enabled: true,
+        autoSync: firebaseAutoSync,
+        syncIntervalMinutes: Number(firebaseInterval) || 2,
+      };
+
+      if (!config.apiKey || !config.projectId || !config.appId) {
+        throw new Error('Please fill in API Key, Project ID, and App ID before testing.');
+      }
+
+      const res = await testFirebaseConnection(config);
+      if (res.success) {
+        setStatusMessage(`Connected successfully to Firebase Firestore! Latency: ${res.latencyMs}ms`);
+      } else {
+        setErrorMessage(res.error || 'Connection failed to Firebase');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to test connection');
+    } finally {
+      setIsTestingCloud(false);
+      setTimeout(() => setStatusMessage(''), 4000);
+    }
+  };
+
+  const handlePushAllToCloud = async () => {
+    if (!window.confirm('Are you sure you want to push all local data to the Cloud? This will upload all sales, products, and records.')) {
+      return;
+    }
+    setIsPushingCloud(true);
+    setErrorMessage('');
+    setCloudProgress({ message: 'Starting cloud backup...', percent: 5 });
+    try {
+      const res = await pushAllLocalDataToCloud((prog) => setCloudProgress(prog));
+      if (res.success) {
+        setStatusMessage(`Cloud Backup Complete! Successfully pushed ${res.totalRecords} records.`);
+      } else {
+        setErrorMessage(res.error || 'Failed to push data to cloud');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error pushing to cloud');
+    } finally {
+      setIsPushingCloud(false);
+      setCloudProgress(null);
+      setTimeout(() => setStatusMessage(''), 5000);
+    }
+  };
+
+  const handlePullAllFromCloud = async () => {
+    if (!window.confirm('Are you sure you want to restore data from Cloud? This will pull all data from Firestore into your local database.')) {
+      return;
+    }
+    setIsPullingCloud(true);
+    setErrorMessage('');
+    setCloudProgress({ message: 'Fetching collections from cloud...', percent: 5 });
+    try {
+      const res = await pullAllDataFromCloud((prog) => setCloudProgress(prog));
+      if (res.success) {
+        setStatusMessage(`Cloud Restore Complete! Restored ${res.totalRecords} records. Reloading...`);
+        setTimeout(() => window.location.reload(), 1500);
+      } else {
+        setErrorMessage(res.error || 'Failed to restore data from cloud');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error pulling from cloud');
+    } finally {
+      setIsPullingCloud(false);
+      setCloudProgress(null);
+    }
+  };
+
+  const handleSyncQueueNow = async () => {
+    setErrorMessage('');
+    try {
+      const res = await processSyncQueue();
+      setStatusMessage(`Sync Queue Processed: ${res.synced} items synced.`);
+      setTimeout(() => setStatusMessage(''), 3000);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to process sync queue');
+    }
+  };
+
   const isElectron = Boolean((window as any).electronAPI);
 
   return (
@@ -352,6 +550,19 @@ export const SettingsManager: React.FC = () => {
           <span>Thermal Printer & Silent Print</span>
           {bridgeStatus?.online && (
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('cloud')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center space-x-2 ${
+            activeTab === 'cloud' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Cloud className="w-4 h-4" />
+          <span>Cloud Database Sync (Firebase)</span>
+          {settings?.firebaseConfig?.enabled && (
+            <span className={`w-2 h-2 rounded-full ${syncStatus.state === 'error' ? 'bg-rose-400' : 'bg-emerald-400'} animate-pulse`}></span>
           )}
         </button>
 
@@ -696,6 +907,338 @@ export const SettingsManager: React.FC = () => {
             </button>
           </div>
         </form>
+      )}
+
+      {/* TAB: Cloud Database Sync (Firebase Firestore) */}
+      {activeTab === 'cloud' && (
+        <div className="flex-1 overflow-y-auto space-y-5 max-w-3xl pr-2">
+          {/* 1. Live Cloud Sync Health Card */}
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                    !firebaseEnabled
+                      ? 'bg-slate-800 text-slate-400'
+                      : !syncStatus.isOnline
+                      ? 'bg-amber-950/60 text-amber-400 border border-amber-500/30'
+                      : syncStatus.state === 'syncing'
+                      ? 'bg-sky-950/60 text-sky-400 border border-sky-500/30'
+                      : syncStatus.state === 'error'
+                      ? 'bg-rose-950/60 text-rose-400 border border-rose-500/30'
+                      : 'bg-emerald-950/60 text-emerald-400 border border-emerald-500/30'
+                  }`}
+                >
+                  <Cloud className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                    <span>Cloud Sync Engine</span>
+                    {firebaseEnabled && (
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                          !syncStatus.isOnline
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : syncStatus.state === 'syncing'
+                            ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            : syncStatus.state === 'error'
+                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                            : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        }`}
+                      >
+                        {!syncStatus.isOnline
+                          ? 'OFFLINE (LOCAL MODE)'
+                          : syncStatus.state === 'syncing'
+                          ? 'SYNCING...'
+                          : syncStatus.state === 'error'
+                          ? 'SYNC ERROR'
+                          : 'ONLINE & SYNCED'}
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {firebaseEnabled
+                      ? 'Offline-first hybrid sync enabled. Sales and stock sync automatically to Google Firebase.'
+                      : 'Cloud sync is currently disabled. All records are stored locally in browser Dexie DB.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Quick sync trigger button */}
+              {firebaseEnabled && (
+                <button
+                  type="button"
+                  onClick={handleSyncQueueNow}
+                  disabled={syncStatus.state === 'syncing' || !syncStatus.isOnline}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-sky-400 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.state === 'syncing' ? 'animate-spin' : ''}`} />
+                  <span>Sync Queue Now</span>
+                </button>
+              )}
+            </div>
+
+            {/* Metrics Grid */}
+            <div className="grid grid-cols-3 gap-3 pt-2">
+              <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Pending Queue</span>
+                <span className="text-base font-bold font-mono text-white mt-0.5 block">
+                  {syncStatus.pendingCount} <span className="text-xs font-normal text-slate-400">items</span>
+                </span>
+              </div>
+              <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Internet Status</span>
+                <span className="text-base font-bold text-white mt-0.5 flex items-center space-x-1.5">
+                  {syncStatus.isOnline ? (
+                    <>
+                      <Wifi className="w-4 h-4 text-emerald-400" />
+                      <span className="text-emerald-300 text-xs font-semibold">Online</span>
+                    </>
+                  ) : (
+                    <>
+                      <WifiOff className="w-4 h-4 text-amber-400" />
+                      <span className="text-amber-300 text-xs font-semibold">Offline</span>
+                    </>
+                  )}
+                </span>
+              </div>
+              <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800">
+                <span className="text-[11px] text-slate-400 block">Last Synced</span>
+                <span className="text-xs font-bold font-mono text-slate-200 mt-1 block truncate">
+                  {syncStatus.lastSyncTime ? formatDateTime(syncStatus.lastSyncTime) : 'Never'}
+                </span>
+              </div>
+            </div>
+
+            {/* Progress bar if full sync or restore active */}
+            {cloudProgress && (
+              <div className="p-3 bg-sky-950/40 border border-sky-500/30 rounded-xl space-y-2">
+                <div className="flex justify-between text-xs text-sky-300 font-semibold">
+                  <span>{cloudProgress.message}</span>
+                  <span>{cloudProgress.percent}%</span>
+                </div>
+                <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-sky-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${cloudProgress.percent}%` }}
+                  ></div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 2. Firebase Credentials Form */}
+          <form onSubmit={handleSaveCloudSettings} className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+              <Globe className="w-4 h-4 text-sky-400" />
+              <span>Firebase Firestore Configuration</span>
+            </h3>
+
+            {/* Enable toggle */}
+            <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl flex items-center justify-between">
+              <div>
+                <label className="text-xs font-bold text-white block cursor-pointer">
+                  Enable Cloud Database Synchronization
+                </label>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Synchronizes sales, products, customers, and repairs with Google Firebase Firestore
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                checked={firebaseEnabled}
+                onChange={(e) => setFirebaseEnabled(e.target.checked)}
+                className="w-5 h-5 rounded text-sky-500 bg-slate-900 border-slate-700 cursor-pointer"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
+                  Firebase Project ID <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={firebaseProjectId}
+                  onChange={(e) => setFirebaseProjectId(e.target.value)}
+                  placeholder="e.g. zenexis-pos-db"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-xs font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
+                  Branch / Terminal Shop ID
+                </label>
+                <input
+                  type="text"
+                  value={firebaseShopId}
+                  onChange={(e) => setFirebaseShopId(e.target.value)}
+                  placeholder="e.g. zenexis-pos-main"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-xs font-semibold"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
+                API Key (apiKey) <span className="text-rose-400">*</span>
+              </label>
+              <input
+                type="password"
+                value={firebaseApiKey}
+                onChange={(e) => setFirebaseApiKey(e.target.value)}
+                placeholder="AIzaSy..."
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-xs font-semibold"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
+                  App ID (appId) <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={firebaseAppId}
+                  onChange={(e) => setFirebaseAppId(e.target.value)}
+                  placeholder="1:1234567890:web:abcdef..."
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-xs font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">
+                  Auth Domain (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={firebaseAuthDomain}
+                  onChange={(e) => setFirebaseAuthDomain(e.target.value)}
+                  placeholder="your-project.firebaseapp.com"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-xs font-semibold"
+                />
+              </div>
+            </div>
+
+            {/* Sync Frequency and Automation */}
+            <div className="pt-2 border-t border-slate-800 space-y-3">
+              <label className="flex items-center space-x-3 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={firebaseAutoSync}
+                  onChange={(e) => setFirebaseAutoSync(e.target.checked)}
+                  className="w-4 h-4 rounded text-sky-500 bg-slate-950 border-slate-700"
+                />
+                <span>Auto-sync changes in background immediately when internet is connected</span>
+              </label>
+
+              <div className="flex items-center space-x-3 max-w-sm">
+                <label className="text-xs text-slate-300 shrink-0">Periodic Interval (Minutes):</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={firebaseInterval}
+                  onChange={(e) => setFirebaseInterval(Number(e.target.value))}
+                  className="w-20 px-2 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs font-bold"
+                />
+              </div>
+            </div>
+
+            {/* Form Action Buttons */}
+            <div className="flex items-center space-x-3 pt-2">
+              <button
+                type="submit"
+                className="px-6 py-2.5 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-sky-500/20 flex items-center space-x-2 transition"
+              >
+                <Save className="w-4 h-4" />
+                <span>Save Cloud Settings</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTestCloudConnection}
+                disabled={isTestingCloud}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 font-bold text-xs rounded-xl flex items-center space-x-2 transition"
+              >
+                <Zap className={`w-4 h-4 text-amber-400 ${isTestingCloud ? 'animate-spin' : ''}`} />
+                <span>{isTestingCloud ? 'Testing...' : 'Test Connection'}</span>
+              </button>
+            </div>
+          </form>
+
+          {/* 3. Full Cloud Backup & Cloud Restore */}
+          <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4">
+            <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+              <Layers className="w-4 h-4 text-indigo-400" />
+              <span>Full Database Cloud Operations</span>
+            </h3>
+            <p className="text-xs text-slate-400">
+              One-click complete sync between your local Dexie database and Firestore cloud database.
+            </p>
+
+            <div className="grid grid-cols-2 gap-4 pt-1">
+              {/* Push All */}
+              <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 flex flex-col justify-between space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-white flex items-center space-x-1.5">
+                    <UploadCloud className="w-4 h-4 text-sky-400" />
+                    <span>Upload All Local Data to Cloud</span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Uploads all existing sales, inventory, repairs, customers, and expenses to Firestore.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handlePushAllToCloud}
+                  disabled={isPushingCloud || !firebaseEnabled}
+                  className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow flex items-center justify-center space-x-2 transition"
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>{isPushingCloud ? 'Uploading...' : 'Push All to Cloud'}</span>
+                </button>
+              </div>
+
+              {/* Pull All */}
+              <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 flex flex-col justify-between space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-white flex items-center space-x-1.5">
+                    <DownloadCloud className="w-4 h-4 text-emerald-400" />
+                    <span>Restore from Cloud Database</span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Downloads all records from Firestore and updates this PC. Ideal for setting up a new counter.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handlePullAllFromCloud}
+                  disabled={isPullingCloud || !firebaseEnabled}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow flex items-center justify-center space-x-2 transition"
+                >
+                  <DownloadCloud className="w-4 h-4" />
+                  <span>{isPullingCloud ? 'Downloading...' : 'Restore from Cloud'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 4. Free Firebase Setup Guide */}
+          <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl space-y-2 text-xs text-slate-400">
+            <h4 className="font-bold text-slate-200 flex items-center space-x-2">
+              <Sparkles className="w-4 h-4 text-amber-400" />
+              <span>How to get Free Firebase Credentials (2 Minutes)</span>
+            </h4>
+            <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-400">
+              <li>Go to <strong className="text-sky-300">console.firebase.google.com</strong> and create a free project.</li>
+              <li>Go to <strong className="text-sky-300">Build &gt; Firestore Database</strong> and click <strong className="text-slate-200">Create Database</strong> (Start in Test Mode).</li>
+              <li>In Project Settings (Gear icon), click <strong className="text-sky-300">&lt;/&gt; (Add Web App)</strong>.</li>
+              <li>Copy the <strong className="text-white font-mono">apiKey</strong>, <strong className="text-white font-mono">projectId</strong>, and <strong className="text-white font-mono">appId</strong> into the fields above and click <strong className="text-emerald-400 font-semibold">Save Cloud Settings</strong>.</li>
+            </ol>
+          </div>
+        </div>
       )}
 
       {/* TAB 3: PIN Security */}

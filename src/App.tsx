@@ -17,10 +17,18 @@ import { ExpenseTracker } from './components/expenses/ExpenseTracker';
 import { PayrollManager } from './components/payroll/PayrollManager';
 import { AIInsightsCenter } from './components/ai/AIInsightsCenter';
 import { SettingsManager } from './components/settings/SettingsManager';
+import { startCloudSyncWorker } from './services/cloudSyncService';
 
 const AppContent: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavTab>('pos');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const { isOwner, lockScreen } = useAuth();
+
+  // Initialize background cloud sync worker
+  useEffect(() => {
+    const cleanup = startCloudSyncWorker();
+    return cleanup;
+  }, []);
 
   // Global Keyboard Shortcuts (F1 - F12)
   useEffect(() => {
@@ -49,13 +57,20 @@ const AppContent: React.FC = () => {
       <TopBar
         onOpenAIInsights={() => setActiveTab('ai')}
         onOpenLowStock={() => setActiveTab('inventory')}
+        onToggleMobileMenu={() => setIsMobileMenuOpen(prev => !prev)}
       />
 
       {/* Main Workspace: Sidebar + Dynamic Module Area */}
-      <div className="flex-1 flex overflow-hidden">
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+      <div className="flex-1 flex overflow-hidden relative">
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          isMobileOpen={isMobileMenuOpen}
+          onCloseMobile={() => setIsMobileMenuOpen(false)}
+          onToggleMobileMenu={() => setIsMobileMenuOpen(prev => !prev)}
+        />
 
-        <main className="flex-1 flex overflow-hidden">
+        <main className="flex-1 flex overflow-hidden pb-16 md:pb-0">
           {activeTab === 'pos' && <POSTerminal onOpenOrderHistory={() => setActiveTab('orders')} />}
           {activeTab === 'orders' && <OrderHistory />}
           {activeTab === 'repairs' && <RepairHub />}

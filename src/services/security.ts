@@ -191,6 +191,20 @@ export const employeeSchema = z.object({
   active: z.boolean().default(true),
 });
 
+export const firebaseConfigSchema = z.object({
+  apiKey: z.string().min(1, 'API key is required'),
+  authDomain: z.string().optional(),
+  projectId: z.string().min(1, 'Project ID is required'),
+  storageBucket: z.string().optional(),
+  messagingSenderId: z.string().optional(),
+  appId: z.string().min(1, 'App ID is required'),
+  shopId: z.string().min(1).default('zenexis-pos-main'),
+  enabled: z.boolean().default(false),
+  autoSync: z.boolean().default(true),
+  syncIntervalMinutes: z.number().min(1).max(60).default(2),
+  lastSyncTime: z.string().optional(),
+}).optional();
+
 export const settingsSchema = z.object({
   shopName: z.string().min(2, 'Shop name is required').max(100),
   shopLocation: z.string().min(2, 'Shop location is required').max(150),
@@ -209,6 +223,7 @@ export const settingsSchema = z.object({
   lowStockThresholdDefault: z.number().int().min(1).max(1000).default(5),
   enableSoundEffects: z.boolean().default(true),
   enableAIInsights: z.boolean().default(true),
+  firebaseConfig: firebaseConfigSchema,
 });
 
 export const databaseBackupSchema = z.object({

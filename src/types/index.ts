@@ -308,6 +308,44 @@ export interface AppSettings {
   enableSoundEffects: boolean;
   enableAIInsights: boolean;
   updatedAt: string;
+  firebaseConfig?: FirebaseConfig;
+}
+
+export interface FirebaseConfig {
+  apiKey: string;
+  authDomain?: string;
+  projectId: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId: string;
+  shopId: string; // Branch or shop identifier (e.g. 'zenexis-pos-main')
+  enabled: boolean;
+  autoSync: boolean;
+  syncIntervalMinutes: number; // default 2 minutes
+  lastSyncTime?: string;
+}
+
+export interface SyncQueueItem {
+  id: string;
+  tableName: string;
+  docId: string;
+  action: 'upsert' | 'delete';
+  data?: any;
+  status: 'pending' | 'syncing' | 'failed';
+  retries: number;
+  lastAttempt?: string;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+export type CloudSyncState = 'idle' | 'syncing' | 'synced' | 'error' | 'offline' | 'disabled';
+
+export interface CloudSyncStatus {
+  state: CloudSyncState;
+  pendingCount: number;
+  lastSyncTime?: string;
+  errorMessage?: string;
+  isOnline: boolean;
 }
 
 

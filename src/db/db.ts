@@ -14,6 +14,7 @@ import {
   SalaryPayment,
   AuditLog,
   AppSettings,
+  SyncQueueItem,
 } from '../types';
 
 export class ZenexisDB extends Dexie {
@@ -31,6 +32,7 @@ export class ZenexisDB extends Dexie {
   salaries!: Table<SalaryPayment, string>;
   auditLogs!: Table<AuditLog, string>;
   settings!: Table<AppSettings, string>;
+  syncQueue!: Table<SyncQueueItem, string>;
 
   constructor() {
     super('ZenexisPOS_DB');
@@ -50,6 +52,10 @@ export class ZenexisDB extends Dexie {
       salaries: 'id, employeeId, month, status',
       auditLogs: 'id, userId, action, timestamp',
       settings: 'id',
+    });
+
+    this.version(2).stores({
+      syncQueue: 'id, tableName, docId, action, status, createdAt',
     });
   }
 }

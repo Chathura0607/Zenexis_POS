@@ -13,7 +13,8 @@
     "electron:build-main": "esbuild electron/main.ts --bundle --platform=node --outfile=dist-electron/main.js --external:electron",
     "electron:compile": "npm run electron:build-main && npm run electron:build-preload",
     "electron:dist": "npm run build && npm run electron:compile && electron-builder --dir",
-    "electron:build": "npm run build && npm run electron:compile && electron-builder --win"
+    "electron:build": "npm run build && npm run electron:compile && electron-builder --win",
+    "deploy:hosting": "npm run build && npx firebase-tools deploy --only hosting"
   },
   "keywords": [
     "pos",
@@ -32,6 +33,7 @@
     "date-fns": "^4.1.0",
     "dexie": "^4.0.11",
     "dexie-react-hooks": "^1.1.7",
+    "firebase": "^13.2.0",
     "jsbarcode": "^3.11.6",
     "jspdf": "^3.0.0",
     "jspdf-autotable": "^5.0.2",

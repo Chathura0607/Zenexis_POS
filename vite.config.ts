@@ -14,6 +14,7 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    host: true, // Listen on all network addresses (0.0.0.0) for phone access
   },
   build: {
     outDir: 'dist',

@@ -8,6 +8,19 @@ dist/
 dist-electron/
 release/
 build/
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.zip
+*.tar.gz
+
+# Firebase cache
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
 
 # IDE & Editor files
 .vscode/
